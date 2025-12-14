@@ -10,6 +10,20 @@
 #include "gpio.h"
 #include <BlynkSimpleEsp32.h>
 
+bool autoMode = true;  
+
+BLYNK_WRITE(V0) {
+  if (!autoMode) {
+    int value = param.asInt();
+    digitalWrite(DC_Pin, value ? HIGH : LOW);
+    Serial.println(value ? "Pump ON (manual)" : "Pump OFF (manual)");
+  }
+}
+
+BLYNK_WRITE(V4) {
+  autoMode = param.asInt();
+  Serial.println(autoMode ? "AUTO mode" : "MANUAL mode");
+}
 
 float readLM75Temperature() {
 /*
@@ -33,31 +47,49 @@ float readLM75Temperature() {
   return random(0,40);
 }
 
+float readWaterlevel(){
+
+  //return map(analogRead(Anlog_Waterlevel_Pin), 0, 1023, 0,6);
+   float raw = analogRead(Anlog_Waterlevel_Pin);
+
+  // Map raw ADC to 0–4
+  float level = map(raw, WATER_EMPTY, WATER_FULL, 0, 4);
+
+  // Safety clamp
+  level = constrain(level, 0, 4);
+
+  return level;
+}
+
 float readH33PHumidity(){
   
-  return map(analogRead(Anlog_Pin), 0, 1023, 0, 100);;
+  //return map(analogRead(Anlog_Pin), 0, 1023, 0, 100);;
+  int humidity=map(analogRead(Anlog_Pin), DRY_SOIL, WET_SOIL, 0, 100);
+  humidity = constrain(humidity, 0, 100);
+  return  humidity;
 }
 void connectBlynk() {
   // Set WiFi to station mode (client me:\Ouyangjing\IOT24\examarbet\esp32s3\GPIO.hode, not access point)
  // WiFi.mode(WIFI_STA);
   //WiFi.begin(ssid, password);
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, password);
+  Blynk.syncVirtual(V0); 
+  Blynk.syncVirtual(V4); 
+
   Serial.println("Connecting to Wi-Fi");
   // Optional: Print local IP
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
-  // Wait until WiFi connection is established
-  /*
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+
   }
-*/
-  }
+
 void setup() {
   pinMode(Anlog_Pin,INPUT_PULLUP);
+  pinMode(Anlog_Waterlevel_Pin,INPUT_PULLUP);
+  pinMode(DC_Pin,OUTPUT);
+  pinMode(LED_Pin,OUTPUT);
   Serial.begin(115200);  // Initialize serial communication for debugging
-  delay(2000);            // Wait for serial monitor to connect
+  delay(5000);            // Wait for serial monitor to connect
   Wire.begin(SDA,SCL);
   connectBlynk();
 }
@@ -66,24 +98,33 @@ void setup() {
 void loop() {
   // Use static variable to track last send time (initialized to allow immediate first send)
    Blynk.run();
-  temperature= readLM75Temperature();
+  temperature= readLM75Temperature();// If temperature is too high,Here can have a fan
   humidity=readH33PHumidity();
+  waterlevel=readWaterlevel();
+    // --------- automatic watering ----------
+
+  if (autoMode) {
+    if (humidity < 40 && waterlevel > 1) {
+      digitalWrite(LED_Pin,HIGH);
+      Blynk.virtualWrite(V5, HIGH);
+      digitalWrite(DC_Pin, HIGH);
+    } else if (humidity > 70 || waterlevel < 1) {
+      
+      digitalWrite(DC_Pin, LOW);
+    }
+  }
   Serial.print("temperature is:");
   Serial.println(temperature);
   Serial.print("humidity is:");
   Serial.println(humidity);
+  Serial.print("waterlevel is:");
+  Serial.println(waterlevel);
 
-   Blynk.virtualWrite(V1, temperature);
-   Blynk.virtualWrite(V2, humidity);
-   
-   Blynk.virtualWrite(V0){
-     if( param.asInt() == 1 && digitalread(DC)==LOW)
-       digitalwrite(DC,HIGH);
-     } else  if( param.asInt() == 1 && digitalread(DC)== High) {
-       Serail.println("DC has already watering");
-   }else digtalwrite(DC,LOW);
-  
-   delay(1000);
+  Blynk.virtualWrite(V1, temperature);
+  Blynk.virtualWrite(V2, humidity);
+  Blynk.virtualWrite(V3, waterlevel);
+
+   delay(5000);
   // Check if it's time to send telemetry data
   /*
   if (millis() - previousMillis >= sendInterval) {
