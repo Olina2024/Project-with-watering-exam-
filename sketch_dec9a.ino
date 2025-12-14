@@ -75,6 +75,14 @@ void loop() {
 
    Blynk.virtualWrite(V1, temperature);
    Blynk.virtualWrite(V2, humidity);
+   
+   Blynk.virtualWrite(V0){
+     if( param.asInt() == 1 && digitalread(DC)==LOW)
+       digitalwrite(DC,HIGH);
+     } else  if( param.asInt() == 1 && digitalread(DC)== High) {
+       Serail.println("DC has already watering");
+   }else digtalwrite(DC,LOW);
+  
    delay(1000);
   // Check if it's time to send telemetry data
   /*
