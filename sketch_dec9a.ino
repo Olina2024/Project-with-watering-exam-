@@ -1,6 +1,8 @@
 #define BLYNK_TEMPLATE_ID "TMPL4VQ2tDL3T"
 #define BLYNK_TEMPLATE_NAME "Esp32"
 #define BLYNK_AUTH_TOKEN "jXpx3L5GRNQe48L_8S8BaRx-ajNrDQ9G"
+#include <InfluxDbClient.h>
+#include <InfluxDbCloud.h>
 #include <Temperature_LM75_Derived.h>
 #include "secret.h"
 #include <WiFiClientSecure.h>
@@ -10,7 +12,46 @@
 #include "gpio.h"
 #include <BlynkSimpleEsp32.h>
 
+// InfluxDB
+#define INFLUXDB_URL "http://192.168.68.109:8086"
+#define INFLUXDB_TOKEN "1K941SBKEARLoRWT_7ypQr2HPPywvkwIZOlyYXNapqyZDr4ooSVw3r6kDIPYrl-1rv3j30uBff7scztDyLEh5A=="
+#define INFLUXDB_ORG "my-org"
+#define INFLUXDB_BUCKET "Esp32plants_data"
+
+InfluxDBClient client(
+  INFLUXDB_URL,
+  INFLUXDB_ORG,
+  INFLUXDB_BUCKET,
+  INFLUXDB_TOKEN
+);
+Point sensor("plant_data");
 bool autoMode = true;  
+bool tempAlertSent  = false;
+bool waterAlertSent = false;
+bool humidAlertSent = false;
+
+void influxTask(void *parameter) {
+  SensorData data;
+
+  for (;;) {
+    if (xQueueReceive(influxQueue, &data, portMAX_DELAY)) {
+
+      sensor.clearFields();
+      sensor.addField("temperature", data.temperature);
+      sensor.addField("humidity", data.humidity);
+      sensor.addField("waterlevel", data.waterlevel);
+
+      if (!client.writePoint(sensor)) {
+        Serial.print("Influx write failed: ");
+        Serial.println(client.getLastErrorMessage());
+      } else {
+        Serial.println("Influx write OK");
+      }
+
+      yield();  // RTOS-friendly
+    }
+  }
+}
 
 BLYNK_WRITE(V0) {
   if (!autoMode) {
@@ -62,7 +103,6 @@ float readWaterlevel(){
 }
 
 float readH33PHumidity(){
-  
   //return map(analogRead(Anlog_Pin), 0, 1023, 0, 100);;
   int humidity=map(analogRead(Anlog_Pin), DRY_SOIL, WET_SOIL, 0, 100);
   humidity = constrain(humidity, 0, 100);
@@ -84,59 +124,115 @@ void connectBlynk() {
   }
 
 void setup() {
-  pinMode(Anlog_Pin,INPUT_PULLUP);
-  pinMode(Anlog_Waterlevel_Pin,INPUT_PULLUP);
-  pinMode(DC_Pin,OUTPUT);
-  pinMode(LED_Pin,OUTPUT);
-  Serial.begin(115200);  // Initialize serial communication for debugging
-  delay(5000);            // Wait for serial monitor to connect
-  Wire.begin(SDA,SCL);
+  Serial.begin(115200);
+  delay(1000);
+
+  pinMode(Anlog_Pin, INPUT);
+  pinMode(Anlog_Waterlevel_Pin, INPUT);
+  pinMode(DC_Pin, OUTPUT);
+  pinMode(Fan_Pin, OUTPUT);
+  pinMode(LED_Pin, OUTPUT);
+
+  Wire.begin(SDA, SCL);
+  // ---- Blynk ----
   connectBlynk();
+  // ---- InfluxDB ----
+  sensor.addTag("device", "esp32s3");
+
+  if (client.validateConnection()) {
+    Serial.println("InfluxDB connected");
+  } else {
+    Serial.println(client.getLastErrorMessage());
+  }
+
+  // ---- Queue ----
+  influxQueue = xQueueCreate(5, sizeof(SensorData));
+  if (influxQueue == NULL) {
+    Serial.println("Queue creation failed!");
+    while (1);
+  }
+
+  // ---- Task on Core 1 ----
+  xTaskCreatePinnedToCore(
+    influxTask,
+    "InfluxTask",
+    8192,
+    NULL,
+    1,
+    &influxTaskHandle,
+    1
+  );
+
+  Serial.println("System ready");
 }
 
 // Arduino main loop - runs continuously
 void loop() {
   // Use static variable to track last send time (initialized to allow immediate first send)
    Blynk.run();
-  temperature= readLM75Temperature();// If temperature is too high,Here can have a fan
-  humidity=readH33PHumidity();
-  waterlevel=readWaterlevel();
-    // --------- automatic watering ----------
+  
+  if (millis() - lastSensorRead >= SENSOR_INTERVAL) {
+    lastSensorRead = millis();
 
-  if (autoMode) {
-    if (humidity < 40 && waterlevel > 1) {
-      digitalWrite(LED_Pin,HIGH);
-      Blynk.virtualWrite(V5, HIGH);
-      digitalWrite(DC_Pin, HIGH);
-    } else if (humidity > 70 || waterlevel < 1) {
-      
-      digitalWrite(DC_Pin, LOW);
+    // ---- Read sensors ----
+    temperature = readLM75Temperature();
+    humidity = readH33PHumidity();
+    waterlevel = readWaterlevel();
+
+
+    // ---------- ALARMS (AUTO + MANUAL) ----------
+   
+    // Temperature alarm
+    if (temperature > 28 && !tempAlertSent) {
+      Blynk.logEvent("high_temperature_alert", "Temperature too high");
+    
+      tempAlertSent = true;
     }
+    if (temperature <= 28) tempAlertSent = false;
+
+    // Water level alarm
+    if (waterlevel <= 1 && !waterAlertSent) {
+      Blynk.logEvent("low_waterlevel_alert", "Water level too low");
+    
+      waterAlertSent = true;
+    }
+    if (waterlevel > 1) waterAlertSent = false;
+
+    // Humidity alarm
+    if (humidity < 40 && waterlevel > 1 && !humidAlertSent) {
+      Blynk.logEvent("low_humidity_alert", "Soil is too dry");
+     
+      humidAlertSent = true;
+    }
+    if (humidity >= 40) humidAlertSent = false;
+    bool alarmActive =
+    (temperature > 28) ||
+    (waterlevel <= 1) ||
+    (humidity < 40 && waterlevel > 1);
+
+    Blynk.virtualWrite(V5, alarmActive ? 255 : 0);
+
+    // ---- Automatic control ----
+    if (autoMode) {
+       digitalWrite(Fan_Pin, temperature > 28 ? HIGH : LOW);
+
+    if (humidity < 40 && waterlevel > 1) {
+        
+        digitalWrite(DC_Pin, HIGH);
+        digitalWrite(LED_Pin, HIGH);
+      } else {
+        digitalWrite(DC_Pin, LOW);
+        digitalWrite(LED_Pin, LOW);
+      }
+    }
+
+    // ---- Send to Blynk ----
+    Blynk.virtualWrite(V1, temperature);
+    Blynk.virtualWrite(V2, humidity);
+    Blynk.virtualWrite(V3, waterlevel);
+
+    // ---- Send to Influx queue ----
+    SensorData data = {temperature, humidity, waterlevel};
+    xQueueSend(influxQueue, &data, 0);
   }
-  Serial.print("temperature is:");
-  Serial.println(temperature);
-  Serial.print("humidity is:");
-  Serial.println(humidity);
-  Serial.print("waterlevel is:");
-  Serial.println(waterlevel);
-
-  Blynk.virtualWrite(V1, temperature);
-  Blynk.virtualWrite(V2, humidity);
-  Blynk.virtualWrite(V3, waterlevel);
-
-   delay(5000);
-  // Check if it's time to send telemetry data
-  /*
-  if (millis() - previousMillis >= sendInterval) {
-    // Update the last send time
-    previousMillis = millis();
-
-    // Publish simulated sensor data (temperature and humidity) as JSON
-  //   bool sendResult = publishTelemetry("{\"temperature\":" + String(temperature, 2) + ",\"humidity\":" + String(humidity,2) + "}");
-    // Restart ESP32 if publish failed (indicates connection issue)
- 
-  }
- */
-  // Process incoming MQTT messages and maintain connection
-
 }
