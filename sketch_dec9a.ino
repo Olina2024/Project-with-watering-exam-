@@ -13,7 +13,7 @@
 #include <BlynkSimpleEsp32.h>
 
 // InfluxDB
-#define INFLUXDB_URL "http://192.168.68.109:8086"
+#define INFLUXDB_URL "http://desktop-v7406t7.local:8086"
 #define INFLUXDB_TOKEN "1K941SBKEARLoRWT_7ypQr2HPPywvkwIZOlyYXNapqyZDr4ooSVw3r6kDIPYrl-1rv3j30uBff7scztDyLEh5A=="
 #define INFLUXDB_ORG "my-org"
 #define INFLUXDB_BUCKET "Esp32plants_data"
@@ -60,6 +60,13 @@ BLYNK_WRITE(V0) {
     Serial.println(value ? "Pump ON (manual)" : "Pump OFF (manual)");
   }
 }
+BLYNK_WRITE(V6) {
+  if (!autoMode) {
+    int value = param.asInt();
+    digitalWrite(Fan_Pin, value ? HIGH : LOW);
+    Serial.println(value ? "Fan ON (manual)" : "Fan OFF (manual)");
+  }
+}
 
 BLYNK_WRITE(V4) {
   autoMode = param.asInt();
@@ -67,7 +74,7 @@ BLYNK_WRITE(V4) {
 }
 
 float readLM75Temperature() {
-/*
+
   Wire.beginTransmission(LM75_ADDR);
   Wire.write(0x00);           // Temperature register
   Wire.endTransmission();
@@ -83,9 +90,9 @@ float readLM75Temperature() {
     return temp * 0.125f;      // each bit = 0.125 °C
   }
 
-  return NAN;
-  */
-  return random(0,40);
+  return random(20,40);
+  
+  //return random(0,40);
 }
 
 float readWaterlevel(){
@@ -114,6 +121,7 @@ void connectBlynk() {
   //WiFi.begin(ssid, password);
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, password);
   Blynk.syncVirtual(V0); 
+  Blynk.syncVirtual(V6); 
   Blynk.syncVirtual(V4); 
 
   Serial.println("Connecting to Wi-Fi");
@@ -146,6 +154,7 @@ void setup() {
   }
 
   // ---- Queue ----
+  
   influxQueue = xQueueCreate(5, sizeof(SensorData));
   if (influxQueue == NULL) {
     Serial.println("Queue creation failed!");
@@ -179,11 +188,20 @@ void loop() {
     humidity = readH33PHumidity();
     waterlevel = readWaterlevel();
 
+    Serial.print("temperatur:");
+    Serial.println(temperature);
 
+    Serial.print("humidity:");
+    Serial.println(humidity);
+
+    Serial.print("waterlevel:");
+    Serial.println(waterlevel); 
     // ---------- ALARMS (AUTO + MANUAL) ----------
    
     // Temperature alarm
+    
     if (temperature > 28 && !tempAlertSent) {
+      
       Blynk.logEvent("high_temperature_alert", "Temperature too high");
     
       tempAlertSent = true;
@@ -209,7 +227,7 @@ void loop() {
     (temperature > 28) ||
     (waterlevel <= 1) ||
     (humidity < 40 && waterlevel > 1);
-
+    
     Blynk.virtualWrite(V5, alarmActive ? 255 : 0);
 
     // ---- Automatic control ----
@@ -217,12 +235,13 @@ void loop() {
        digitalWrite(Fan_Pin, temperature > 28 ? HIGH : LOW);
 
     if (humidity < 40 && waterlevel > 1) {
-        
+        Serial.println("Begin to watering.....");
         digitalWrite(DC_Pin, HIGH);
-        digitalWrite(LED_Pin, HIGH);
+        
       } else {
+        Serial.println("Stop watering.....");
         digitalWrite(DC_Pin, LOW);
-        digitalWrite(LED_Pin, LOW);
+      
       }
     }
 
@@ -230,9 +249,13 @@ void loop() {
     Blynk.virtualWrite(V1, temperature);
     Blynk.virtualWrite(V2, humidity);
     Blynk.virtualWrite(V3, waterlevel);
-
+    
     // ---- Send to Influx queue ----
     SensorData data = {temperature, humidity, waterlevel};
+    
+    
     xQueueSend(influxQueue, &data, 0);
+   
   }
+  
 }
